@@ -314,18 +314,19 @@
 
                 if (response.ok) {
                     const result = await response.json();
+                    // ВАЖНО: используем result.orderNumber, а не result.orderId
+                    const orderNumber = result.orderNumber;
 
-                    // Показываем напоминание о боте
                     tg.showPopup({
                         title: 'Заказ оформлен',
-                        message: 'Ваше общение с продавцом будет происходить в боте. Перейдите в бота и нажмите «Старт», чтобы начать диалог.',
+                        message: 'Ваше общение с продавцом будет происходить в боте. Нажмите кнопку ниже, чтобы открыть бота и начать диалог.',
                         buttons: [
                             { id: 'open', type: 'default', text: 'Открыть бота' },
                             { id: 'close', type: 'cancel', text: 'Позже' }
                         ]
                     }, (buttonId) => {
                         if (buttonId === 'open') {
-                            tg.openTelegramLink('https://t.me/DpSborKatalogBot');
+                            tg.openTelegramLink('https://t.me/DpSborKatalogBot?start=order_' + orderNumber);
                         }
                         window.location.href = 'orders.html';
                     });
