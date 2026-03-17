@@ -170,6 +170,7 @@
         let cart = null;
         let products = [];
         let pickupLocations = [];
+        let currentOrderTotal = 0; // Глобальная переменная для хранения суммы заказа
 
         async function loadData() {
             await loadProducts();
@@ -223,6 +224,8 @@
                 itemsList.appendChild(div);
             });
 
+            // Сохраняем общую сумму в глобальную переменную
+            currentOrderTotal = total;
             document.getElementById('total-amount').innerText = `Сумма заказа: ${total} руб.`;
         }
 
@@ -306,10 +309,16 @@
                     userId: user?.id
                 };
 
+                // Отправляем запрос с явным указанием суммы заказа
                 const response = await fetch('/api/order', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ userId, contact, requestId })
+                    body: JSON.stringify({ 
+                        userId, 
+                        contact, 
+                        requestId,
+                        total: currentOrderTotal  // Явно передаём сумму из глобальной переменной
+                    })
                 });
 
                 if (response.ok) {
