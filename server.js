@@ -278,128 +278,189 @@ app.get('/api/pickup-locations', async (req, res) => {
 
 // Создание заказа
 app.post('/api/order', async (req, res) => {
-  const { userId, contact, requestId } = req.body;
-  const numUserId = parseInt(userId, 10);
-  const address = contact.address;
-  const deliveryType = contact.deliveryType;
-
-  if (!requestId) {
-    return res.status(400).json({ error: 'Missing requestId' });
-  }
-
   try {
-    // Проверка на дубликат
-    const existing = await pool.query('SELECT id FROM orders WHERE request_id = $1', [requestId]);
-    if (existing.rows.length > 0) {
-      console.log(`⚠️ Дублирующийся запрос с requestId ${requestId} отклонён`);
-      return res.status(409).json({ error: 'Duplicate order' });
+    const data = req.body;
+    if (!data) {
+      return res.status(400).json({ error: 'No data' });
     }
 
+    const userId = data.userId;
+    const buyer_name = data.contact?.name || 'Покупатель';
+    const items = data.items;
+    const total = data.total;
+    const address = data.contact?.address;
+    const payment = data.contact?.paymentMethod;
+    const delivery = data.contact?.deliveryType;
+    const contact = data.contact;
+    const request_id = data.requestId;
+
+    if (!userId || !items || !total || !address) {
+      return res.status(400).json({ error: 'Missing required fields' });
+    }
+
+    console.log(`Получен запрос на новый заказ: delivery=${delivery}, address=${address}`);
+
+    // Проверка на дубликат
+    if (request_id) {
+      const existing = await pool.query('SELECT id FROM orders WHERE request_id = $1', [request_id]);
+      if (existing.rows.length > 0) {
+        console.log(`⚠️ Дублирующийся запрос с requestId ${request_id} отклонён`);
+        return res.status(409).json({ error: 'Duplicate order' });
+      }
+    }
+
+    // Получаем seller_id из точки самовывоза
     let seller_id = null;
     let address_id = null;
-    if (deliveryType === 'pickup') {
-      const addrResult = await pool.query('SELECT id, seller_id FROM pickup_locations WHERE address = $1', [address]);
+    let prefix = null;
+    
+    if (delivery === 'pickup') {
+      const addrResult = await pool.query(
+        'SELECT id, seller_id, prefix FROM pickup_locations WHERE address = $1', 
+        [address]
+      );
       if (addrResult.rows.length === 0) {
         return res.status(400).json({ error: 'Invalid pickup address' });
       }
       address_id = addrResult.rows[0].id;
       seller_id = addrResult.rows[0].seller_id;
+      prefix = addrResult.rows[0].prefix;
+    } else {
+      // Для доставки - администратор (id=6)
+      seller_id = 6;
+      prefix = 'D';
     }
 
-    // Получаем содержимое корзины с вариантами и рассчитываем price_seller
+    // Получаем информацию о продавце
+    const seller = await pool.query('SELECT name FROM sellers WHERE id = $1', [seller_id]);
+    const seller_name = seller.rows[0]?.name || 'Неизвестный';
+
+    // Получаем содержимое корзины
     const cartResult = await pool.query(`
       SELECT 
         c.product_id, c.variant_id, c.quantity, c.price_at_time,
         p.name,
-        v.name as variant_name,
-        p.purchase_price_kg,
-        v.weight_kg,
-        v.packaging_cost,
-        v.price
+        v.name as variant_name
       FROM carts c
       JOIN products p ON c.product_id = p.id
       LEFT JOIN product_variants v ON c.variant_id = v.id
       WHERE c.user_id = $1
-    `, [numUserId]);
+    `, [userId]);
 
     if (cartResult.rows.length === 0) {
       return res.status(400).json({ error: 'Cart is empty' });
     }
 
-    let total = 0;
+    let total_sum = 0;
     const orderItems = cartResult.rows.map(row => {
       const itemTotal = row.price_at_time * row.quantity;
-      total += itemTotal;
-      
-      // Рассчитываем price_seller для сохранения в заказе
-      const base_cost = (row.purchase_price_kg * row.weight_kg) + (row.packaging_cost || 0);
-      const avg_price = (row.price + base_cost) / 2;
-      const price_seller = Math.ceil(avg_price / 10) * 10;
-      
+      total_sum += itemTotal;
       return {
         productId: row.product_id,
         variantId: row.variant_id,
         name: row.name,
         variantName: row.variant_name,
         quantity: row.quantity,
-        price: row.price_at_time, // цена покупателя на момент покупки
-        price_seller: price_seller // рассчитанная цена продавца
+        price: row.price_at_time,
       };
     });
+
+    // Генерируем номер заказа
+    const order_number = await generateOrderNumber(prefix);
 
     const itemsJson = JSON.stringify(orderItems);
     const contactJson = JSON.stringify(contact);
 
+    // Вставляем заказ
     const insertResult = await pool.query(`
-      INSERT INTO orders (user_id, seller_id, address_id, items, total, contact, status, request_id)
-      VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+      INSERT INTO orders (order_number, user_id, seller_id, address_id, items, total, contact, status, request_id)
+      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
       RETURNING id
-    `, [numUserId, seller_id, address_id, itemsJson, total, contactJson, 'Активный', requestId]);
+    `, [order_number, userId, seller_id, address_id, itemsJson, total_sum, contactJson, 'Активный', request_id]);
 
     const orderId = insertResult.rows[0].id;
 
-    await pool.query('DELETE FROM carts WHERE user_id = $1', [numUserId]);
+    // Очищаем корзину
+    await pool.query('DELETE FROM carts WHERE user_id = $1', [userId]);
 
-    console.log('Новый заказ:', { id: orderId, userId: numUserId, items: orderItems, total, contact, seller_id, address_id, requestId });
+    console.log('Новый заказ:', { id: orderId, userId, items: orderItems, total: total_sum, contact, seller_id, address_id, request_id, order_number });
 
     // Отправка заказа в бота
     let orderNumberFromBot = null;
     if (process.env.BOT_URL) {
       const botOrderData = {
-        userId: numUserId,
-        name: contact.name,
+        userId: userId,
+        name: buyer_name,
         items: orderItems,
-        total: total,
+        total: total_sum,
         address: address,
-        paymentMethod: contact.paymentMethod,
-        deliveryType: deliveryType,
+        paymentMethod: payment,
+        deliveryType: delivery,
         contact: contact,
-        requestId: requestId
+        requestId: request_id
       };
       try {
-        const botResponse = await fetch(`${process.env.BOT_URL}/api/new-order`, {
+        const botUrl = process.env.BOT_URL;
+        console.log(`Отправка заказа в бота: ${botUrl}/api/new-order`);
+        
+        const botResponse = await fetch(`${botUrl}/api/new-order`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify(botOrderData)
         });
-        const botData = await botResponse.json();
-        if (botData.orderNumber) {
-          orderNumberFromBot = botData.orderNumber;
-          await pool.query('UPDATE orders SET order_number = $1 WHERE id = $2', [orderNumberFromBot, orderId]);
+        
+        if (botResponse.ok) {
+          const botData = await botResponse.json();
+          if (botData.orderNumber) {
+            orderNumberFromBot = botData.orderNumber;
+            await pool.query('UPDATE orders SET order_number = $1 WHERE id = $2', [orderNumberFromBot, orderId]);
+          }
+          console.log(`✅ Заказ отправлен в бота, получен номер: ${orderNumberFromBot}`);
+        } else {
+          const errorText = await botResponse.text();
+          console.error(`❌ Бот вернул ошибку ${botResponse.status}: ${errorText.substring(0, 200)}`);
         }
-        console.log('✅ Заказ отправлен в бота, получен номер:', orderNumberFromBot);
       } catch (err) {
-        console.error('❌ Ошибка отправки в бота:', err);
+        console.error(`❌ Ошибка отправки в бота: ${err.message}`);
       }
     }
 
-    res.json({ orderId: orderId, orderNumber: orderNumberFromBot });
+    // Возвращаем клиенту номер заказа (строку с префиксом)
+    res.json({ orderNumber: order_number });
 
   } catch (err) {
-    console.error(err);
-    res.status(500).json({ error: 'Database error' });
+    console.error('❌ Ошибка в /api/order:', err);
+    res.status(500).json({ error: 'Internal server error' });
   }
 });
+
+// Вспомогательная функция для генерации номера заказа
+async function generateOrderNumber(prefix) {
+  if (!prefix) {
+    console.error('generateOrderNumber: prefix is null, using X');
+    prefix = 'X';
+  }
+  
+  // Обрезаем до 3 символов
+  if (prefix.length > 3) {
+    prefix = prefix.substring(0, 3);
+  }
+  
+  const result = await pool.query(
+    `SELECT order_number FROM orders 
+     WHERE order_number LIKE $1 
+     ORDER BY id DESC LIMIT 1`,
+    [prefix + '%']
+  );
+  
+  if (result.rows.length > 0) {
+    const lastNum = result.rows[0].order_number.substring(prefix.length);
+    const num = parseInt(lastNum) || 0;
+    return prefix + (num + 1);
+  } else {
+    return prefix + '1';
+  }
+}
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
