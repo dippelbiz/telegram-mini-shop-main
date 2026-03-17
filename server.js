@@ -311,9 +311,16 @@ async function generateOrderNumber(prefix) {
 
 // Создание заказа
 app.post('/api/order', async (req, res) => {
+  console.log('='.repeat(60));
+  console.log('🔵 НАЧАЛО ОБРАБОТКИ ЗАКАЗА');
+  console.log('='.repeat(60));
+  
   try {
     const data = req.body;
+    console.log('📦 Полученные данные:', JSON.stringify(data, null, 2));
+    
     if (!data) {
+      console.error('❌ Нет данных в запросе');
       return res.status(400).json({ error: 'No data' });
     }
 
@@ -327,19 +334,25 @@ app.post('/api/order', async (req, res) => {
     const contact = data.contact;
     const request_id = data.requestId;
 
+    console.log(`👤 Пользователь: ${userId}`);
+    console.log(`🏠 Адрес: ${address}`);
+    console.log(`🚚 Тип доставки: ${delivery}`);
+    console.log(`💰 Сумма: ${total}`);
+
     if (!userId || !items || !total || !address) {
+      console.error('❌ Отсутствуют обязательные поля');
       return res.status(400).json({ error: 'Missing required fields' });
     }
 
-    console.log(`Получен запрос на новый заказ: delivery=${delivery}, address=${address}`);
-
     // Проверка на дубликат
     if (request_id) {
+      console.log(`🔍 Проверка request_id: ${request_id}`);
       const existing = await pool.query('SELECT id FROM orders WHERE request_id = $1', [request_id]);
       if (existing.rows.length > 0) {
         console.log(`⚠️ Дублирующийся запрос с requestId ${request_id} отклонён`);
         return res.status(409).json({ error: 'Duplicate order' });
       }
+      console.log('✅ Request_id уникален');
     }
 
     // Получаем seller_id из точки самовывоза
@@ -348,33 +361,39 @@ app.post('/api/order', async (req, res) => {
     let prefix = null;
     
     if (delivery === 'pickup') {
+      console.log(`🔍 Поиск точки самовывоза: ${address}`);
       const addrResult = await pool.query(
         'SELECT id, seller_id, prefix FROM pickup_locations WHERE address = $1', 
         [address]
       );
       if (addrResult.rows.length === 0) {
+        console.error(`❌ Адрес не найден: ${address}`);
         return res.status(400).json({ error: 'Invalid pickup address' });
       }
       address_id = addrResult.rows[0].id;
       seller_id = addrResult.rows[0].seller_id;
       prefix = addrResult.rows[0].prefix;
       
+      console.log(`✅ Точка найдена: ID=${address_id}, продавец=${seller_id}, префикс=${prefix}`);
+      
       // Если префикс не задан, используем первую букву имени продавца
       if (!prefix) {
         const seller = await pool.query('SELECT name FROM sellers WHERE id = $1', [seller_id]);
         const seller_name = seller.rows[0]?.name || 'X';
         prefix = seller_name[0].toUpperCase();
-        console.log(`Префикс не задан для точки, использовано имя продавца: ${prefix}`);
+        console.log(`⚠️ Префикс не задан, использовано имя продавца: ${prefix}`);
       }
     } else {
       // Для доставки - администратор (id=6)
       seller_id = 6;
       prefix = 'D';
+      console.log(`🚚 Доставка: продавец-админ ID=6, префикс=D`);
     }
 
-    console.log(`Определён продавец ID: ${seller_id}, префикс: ${prefix}`);
+    console.log(`✅ Определён продавец ID: ${seller_id}, префикс: ${prefix}`);
 
     // Получаем содержимое корзины
+    console.log(`🔍 Получение корзины пользователя ${userId}`);
     const cartResult = await pool.query(`
       SELECT 
         c.product_id, c.variant_id, c.quantity, c.price_at_time,
@@ -386,7 +405,10 @@ app.post('/api/order', async (req, res) => {
       WHERE c.user_id = $1
     `, [userId]);
 
+    console.log(`📦 Найдено позиций в корзине: ${cartResult.rows.length}`);
+
     if (cartResult.rows.length === 0) {
+      console.error('❌ Корзина пуста');
       return res.status(400).json({ error: 'Cart is empty' });
     }
 
@@ -404,15 +426,19 @@ app.post('/api/order', async (req, res) => {
       };
     });
 
+    console.log('📝 Состав заказа:', orderItems);
+    console.log(`💰 Итого: ${total_sum}`);
+
     // Генерируем номер заказа
-    console.log(`Генерация номера для префикса: ${prefix}`);
+    console.log(`🔢 Генерация номера для префикса: ${prefix}`);
     const order_number = await generateOrderNumber(prefix);
-    console.log(`Сгенерирован номер заказа: ${order_number}`);
+    console.log(`✅ Сгенерирован номер заказа: ${order_number}`);
 
     const itemsJson = JSON.stringify(orderItems);
     const contactJson = JSON.stringify(contact);
 
     // Вставляем заказ
+    console.log('💾 Сохранение заказа в БД...');
     const insertResult = await pool.query(`
       INSERT INTO orders (order_number, user_id, seller_id, address_id, items, total, contact, status, request_id)
       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
@@ -420,11 +446,23 @@ app.post('/api/order', async (req, res) => {
     `, [order_number, userId, seller_id, address_id, itemsJson, total_sum, contactJson, 'Активный', request_id]);
 
     const orderId = insertResult.rows[0].id;
+    console.log(`✅ Заказ сохранён с ID: ${orderId}`);
 
     // Очищаем корзину
     await pool.query('DELETE FROM carts WHERE user_id = $1', [userId]);
+    console.log('✅ Корзина очищена');
 
-    console.log('Новый заказ:', { id: orderId, userId, items: orderItems, total: total_sum, contact, seller_id, address_id, request_id, order_number });
+    console.log('📋 Итоговая информация о заказе:', { 
+      id: orderId, 
+      userId, 
+      items: orderItems, 
+      total: total_sum, 
+      contact, 
+      seller_id, 
+      address_id, 
+      request_id, 
+      order_number 
+    });
 
     // Отправка заказа в бота
     let orderNumberFromBot = null;
@@ -442,7 +480,7 @@ app.post('/api/order', async (req, res) => {
       };
       try {
         const botUrl = process.env.BOT_URL;
-        console.log(`Отправка заказа в бота: ${botUrl}/api/new-order`);
+        console.log(`📤 Отправка заказа в бота: ${botUrl}/api/new-order`);
         
         const botResponse = await fetch(`${botUrl}/api/new-order`, {
           method: 'POST',
@@ -455,8 +493,10 @@ app.post('/api/order', async (req, res) => {
           if (botData.orderNumber) {
             orderNumberFromBot = botData.orderNumber;
             await pool.query('UPDATE orders SET order_number = $1 WHERE id = $2', [orderNumberFromBot, orderId]);
+            console.log(`✅ Заказ отправлен в бота, получен номер: ${orderNumberFromBot}`);
+          } else {
+            console.log(`⚠️ Бот не вернул номер заказа`);
           }
-          console.log(`✅ Заказ отправлен в бота, получен номер: ${orderNumberFromBot}`);
         } else {
           const errorText = await botResponse.text();
           console.error(`❌ Бот вернул ошибку ${botResponse.status}: ${errorText.substring(0, 200)}`);
@@ -464,13 +504,21 @@ app.post('/api/order', async (req, res) => {
       } catch (err) {
         console.error(`❌ Ошибка отправки в бота: ${err.message}`);
       }
+    } else {
+      console.log('⚠️ BOT_URL не задан, пропускаем отправку в бота');
     }
 
+    console.log('='.repeat(60));
+    console.log('✅ ЗАКАЗ УСПЕШНО ОБРАБОТАН');
+    console.log('='.repeat(60));
+    
     // Возвращаем клиенту номер заказа (строку с префиксом)
     res.json({ orderNumber: order_number });
 
   } catch (err) {
-    console.error('❌ Ошибка в /api/order:', err);
+    console.error('❌ КРИТИЧЕСКАЯ ОШИБКА В /api/order:');
+    console.error(err);
+    console.error('='.repeat(60));
     res.status(500).json({ error: 'Internal server error' });
   }
 });
