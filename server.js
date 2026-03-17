@@ -276,6 +276,39 @@ app.get('/api/pickup-locations', async (req, res) => {
   }
 });
 
+// Вспомогательная функция для генерации номера заказа
+async function generateOrderNumber(prefix) {
+  if (!prefix) {
+    console.error('generateOrderNumber: prefix is null, using X');
+    prefix = 'X';
+  }
+  
+  // Обрезаем до 3 символов
+  if (prefix.length > 3) {
+    prefix = prefix.substring(0, 3);
+  }
+  
+  try {
+    const result = await pool.query(
+      `SELECT order_number FROM orders 
+       WHERE order_number LIKE $1 
+       ORDER BY id DESC LIMIT 1`,
+      [prefix + '%']
+    );
+    
+    if (result.rows.length > 0) {
+      const lastNum = result.rows[0].order_number.substring(prefix.length);
+      const num = parseInt(lastNum) || 0;
+      return prefix + (num + 1);
+    } else {
+      return prefix + '1';
+    }
+  } catch (err) {
+    console.error('Ошибка при генерации номера заказа:', err);
+    return prefix + '1'; // Запасной вариант
+  }
+}
+
 // Создание заказа
 app.post('/api/order', async (req, res) => {
   try {
@@ -325,15 +358,21 @@ app.post('/api/order', async (req, res) => {
       address_id = addrResult.rows[0].id;
       seller_id = addrResult.rows[0].seller_id;
       prefix = addrResult.rows[0].prefix;
+      
+      // Если префикс не задан, используем первую букву имени продавца
+      if (!prefix) {
+        const seller = await pool.query('SELECT name FROM sellers WHERE id = $1', [seller_id]);
+        const seller_name = seller.rows[0]?.name || 'X';
+        prefix = seller_name[0].toUpperCase();
+        console.log(`Префикс не задан для точки, использовано имя продавца: ${prefix}`);
+      }
     } else {
       // Для доставки - администратор (id=6)
       seller_id = 6;
       prefix = 'D';
     }
 
-    // Получаем информацию о продавце
-    const seller = await pool.query('SELECT name FROM sellers WHERE id = $1', [seller_id]);
-    const seller_name = seller.rows[0]?.name || 'Неизвестный';
+    console.log(`Определён продавец ID: ${seller_id}, префикс: ${prefix}`);
 
     // Получаем содержимое корзины
     const cartResult = await pool.query(`
@@ -366,7 +405,9 @@ app.post('/api/order', async (req, res) => {
     });
 
     // Генерируем номер заказа
+    console.log(`Генерация номера для префикса: ${prefix}`);
     const order_number = await generateOrderNumber(prefix);
+    console.log(`Сгенерирован номер заказа: ${order_number}`);
 
     const itemsJson = JSON.stringify(orderItems);
     const contactJson = JSON.stringify(contact);
@@ -433,34 +474,6 @@ app.post('/api/order', async (req, res) => {
     res.status(500).json({ error: 'Internal server error' });
   }
 });
-
-// Вспомогательная функция для генерации номера заказа
-async function generateOrderNumber(prefix) {
-  if (!prefix) {
-    console.error('generateOrderNumber: prefix is null, using X');
-    prefix = 'X';
-  }
-  
-  // Обрезаем до 3 символов
-  if (prefix.length > 3) {
-    prefix = prefix.substring(0, 3);
-  }
-  
-  const result = await pool.query(
-    `SELECT order_number FROM orders 
-     WHERE order_number LIKE $1 
-     ORDER BY id DESC LIMIT 1`,
-    [prefix + '%']
-  );
-  
-  if (result.rows.length > 0) {
-    const lastNum = result.rows[0].order_number.substring(prefix.length);
-    const num = parseInt(lastNum) || 0;
-    return prefix + (num + 1);
-  } else {
-    return prefix + '1';
-  }
-}
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
