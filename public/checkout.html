@@ -170,7 +170,7 @@
         let cart = null;
         let products = [];
         let pickupLocations = [];
-        let currentOrderTotal = 0; // Глобальная переменная для хранения суммы заказа
+        let currentOrderTotal = 0;
 
         async function loadData() {
             await loadProducts();
@@ -224,7 +224,6 @@
                 itemsList.appendChild(div);
             });
 
-            // Сохраняем общую сумму в глобальную переменную
             currentOrderTotal = total;
             document.getElementById('total-amount').innerText = `Сумма заказа: ${total} руб.`;
         }
@@ -309,21 +308,32 @@
                     userId: user?.id
                 };
 
-                // Отправляем запрос с явным указанием суммы заказа
+                // Проверяем, что корзина не пуста
+                if (!cart || !cart.items || cart.items.length === 0) {
+                    alert('Корзина пуста');
+                    e.target.disabled = false;
+                    return;
+                }
+
+                // Формируем данные для отправки
+                const orderData = {
+                    userId: userId,
+                    contact: contact,
+                    requestId: requestId,
+                    total: currentOrderTotal,
+                    items: cart.items  // Явно передаём все товары из корзины
+                };
+
+                console.log('📤 Отправка заказа:', orderData);
+
                 const response = await fetch('/api/order', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ 
-                        userId, 
-                        contact, 
-                        requestId,
-                        total: currentOrderTotal  // Явно передаём сумму из глобальной переменной
-                    })
+                    body: JSON.stringify(orderData)
                 });
 
                 if (response.ok) {
                     const result = await response.json();
-                    // ВАЖНО: используем result.orderNumber, а не result.orderId
                     const orderNumber = result.orderNumber;
 
                     tg.showPopup({
@@ -351,8 +361,8 @@
                     }
                 }
             } catch (err) {
-                console.error(err);
-                alert('Произошла ошибка');
+                console.error('❌ Критическая ошибка:', err);
+                alert('Произошла ошибка при оформлении заказа');
                 e.target.disabled = false;
             }
         });
