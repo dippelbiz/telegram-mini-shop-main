@@ -305,7 +305,7 @@ async function generateOrderNumber(prefix) {
     }
   } catch (err) {
     console.error('Ошибка при генерации номера заказа:', err);
-    return prefix + '1'; // Запасной вариант
+    return prefix + '1';
   }
 }
 
@@ -326,8 +326,6 @@ app.post('/api/order', async (req, res) => {
 
     const userId = data.userId;
     const buyer_name = data.contact?.name || 'Покупатель';
-    const items = data.items;
-    const total = data.total;
     const address = data.contact?.address;
     const payment = data.contact?.paymentMethod;
     const delivery = data.contact?.deliveryType;
@@ -337,9 +335,8 @@ app.post('/api/order', async (req, res) => {
     console.log(`👤 Пользователь: ${userId}`);
     console.log(`🏠 Адрес: ${address}`);
     console.log(`🚚 Тип доставки: ${delivery}`);
-    console.log(`💰 Сумма: ${total}`);
 
-    if (!userId || !items || !total || !address) {
+    if (!userId || !address) {
       console.error('❌ Отсутствуют обязательные поля');
       return res.status(400).json({ error: 'Missing required fields' });
     }
@@ -392,13 +389,17 @@ app.post('/api/order', async (req, res) => {
 
     console.log(`✅ Определён продавец ID: ${seller_id}, префикс: ${prefix}`);
 
-    // Получаем содержимое корзины
+    // Получаем содержимое корзины с вариантами и рассчитываем price_seller
     console.log(`🔍 Получение корзины пользователя ${userId}`);
     const cartResult = await pool.query(`
       SELECT 
         c.product_id, c.variant_id, c.quantity, c.price_at_time,
         p.name,
-        v.name as variant_name
+        v.name as variant_name,
+        p.purchase_price_kg,
+        v.weight_kg,
+        v.packaging_cost,
+        v.price
       FROM carts c
       JOIN products p ON c.product_id = p.id
       LEFT JOIN product_variants v ON c.variant_id = v.id
@@ -416,6 +417,12 @@ app.post('/api/order', async (req, res) => {
     const orderItems = cartResult.rows.map(row => {
       const itemTotal = row.price_at_time * row.quantity;
       total_sum += itemTotal;
+      
+      // Рассчитываем price_seller по формуле
+      const base_cost = (row.purchase_price_kg * row.weight_kg) + (row.packaging_cost || 0);
+      const avg_price = (row.price + base_cost) / 2;
+      const price_seller = Math.ceil(avg_price / 10) * 10;
+      
       return {
         productId: row.product_id,
         variantId: row.variant_id,
@@ -423,6 +430,7 @@ app.post('/api/order', async (req, res) => {
         variantName: row.variant_name,
         quantity: row.quantity,
         price: row.price_at_time,
+        price_seller: price_seller  // ВАЖНО: добавляем поле для расчётов
       };
     });
 
@@ -512,7 +520,7 @@ app.post('/api/order', async (req, res) => {
     console.log('✅ ЗАКАЗ УСПЕШНО ОБРАБОТАН');
     console.log('='.repeat(60));
     
-    // Возвращаем клиенту номер заказа (строку с префиксом)
+    // Возвращаем клиенту номер заказа
     res.json({ orderNumber: order_number });
 
   } catch (err) {
